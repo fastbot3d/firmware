@@ -1,0 +1,28 @@
+CROSS_COMPILE?=arm-linux-gnueabihf-
+
+LIBDIR_APP_LOADER?=../../lib
+INCDIR_APP_LOADER?=../../include
+BINDIR?=../../bin
+
+CFLAGS+= -Wall -I$(INCDIR_APP_LOADER) -D__DEBUG -O2 -mtune=cortex-a8 -march=armv7-a
+LDFLAGS+=-L$(LIBDIR_APP_LOADER) -lprussdrvd
+OBJDIR=obj
+TARGET=$(BINDIR)/pru_gpio
+
+_DEPS =
+DEPS = $(patsubst %,$(INCDIR_APP_LOADER)/%,$(_DEPS))
+
+_OBJ = pru_gpio.o
+OBJ = $(patsubst %,$(OBJDIR)/%,$(_OBJ))
+
+$(OBJDIR)/%.o: %.c $(DEPS)
+	@mkdir -p obj
+	$(CROSS_COMPILE)gcc $(CFLAGS) -c -o $@ $<
+
+$(TARGET): $(OBJ)
+	$(CROSS_COMPILE)gcc $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+.PHONY: clean
+
+clean:
+	rm -rf $(OBJDIR)/ *~  $(INCDIR_APP_LOADER)/*~  $(TARGET)

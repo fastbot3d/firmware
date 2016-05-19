@@ -395,15 +395,15 @@ int stepper_homing_axis(uint8_t axis, uint8_t reverse)
     /* Check lmsw first */
     switch (axis) {
     case X_AXIS:
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_X, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_X, NULL);
         break;
 
     case Y_AXIS: 
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_Y, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_Y, NULL);
         break;
 
     case Z_AXIS:
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_Z, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_Z, NULL);
         break;
 
     default:
@@ -464,15 +464,15 @@ int stepper_wait_for_lmsw(uint8_t axis)
     /* Check lmsw first */
     switch (axis) {
     case X_AXIS:
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_X, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_X, NULL);
         break;
 
     case Y_AXIS: 
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_Y, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_Y, NULL);
         break;
 
     case Z_AXIS:
-        limited = ioctl(st_dev_fd, STEPPER_CH_LMSW_Z, NULL);
+        limited = ioctl(st_dev_fd, STEPPER_CH_MIN_Z, NULL);
         break;
 
     default:

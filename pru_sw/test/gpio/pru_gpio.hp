@@ -1,0 +1,131 @@
+#ifndef _PRU_GPIO_HP_
+#define _PRU_GPIO_HP_
+
+#define GPIO0 0x44E07000
+#define GPIO1 0x4804C000
+#define GPIO2 0x481AC000
+#define GPIO3 0x481AE000
+
+#define GPIO_CLR_DATA   0x190
+#define GPIO_SET_DATA   0x194
+#define GPIO_DATAOUT    0x13C
+
+.struct delay_t
+    .u32 cnt
+    .u32 ns
+.ends
+.assign delay_t, r12, *, delay
+
+.struct gpio_t
+    .u32 reg
+    .u32 data
+    .u32 port
+.ends
+.assign gpio_t, r14, *, gpio
+//--------------------------------------------------------- 
+// gpio_set: set one of the CPU gpio pins
+// Usage   : gpio_set port bit
+//           gpio_set 2 19 -> set gpio2_19 high
+//---------------------------------------------------------
+.macro gpio_set
+.mparam p, b
+    LDI  gpio.port, 0
+    QBNE CH_GPIO1, gpio.port, p
+    MOV  gpio.reg, GPIO0 | GPIO_DATAOUT
+
+CH_GPIO1:
+    LDI  gpio.port, 1
+    QBNE CH_GPIO2, gpio.port, p
+    MOV  gpio.reg, GPIO1 | GPIO_DATAOUT
+
+CH_GPIO2:
+    LDI  gpio.port, 2
+    QBNE CH_GPIO3, gpio.port, p
+    MOV  gpio.reg, GPIO2 | GPIO_DATAOUT
+
+CH_GPIO3:
+    LDI  gpio.port, 3
+    QBNE SET_BIT, gpio.port, p
+    MOV  gpio.reg, GPIO3 | GPIO_DATAOUT
+
+SET_BIT:
+    LBBO gpio.data, gpio.reg, 0, 4
+    SET  gpio.data, b 
+    SBBO gpio.data, gpio.reg, 0, 4
+.endm
+//---------------------------------------------------------
+// gpio_clr: clr one of the CPU gpio pins
+// Usage   : gpio_set port bit
+//           gpio_clr 2 19 -> set gpio2_19 low
+//---------------------------------------------------------
+.macro gpio_clr
+.mparam p, b
+    LDI  gpio.port, 0
+    QBNE CH_GPIO1, gpio.port, p
+    MOV  gpio.reg, GPIO0 | GPIO_DATAOUT
+
+CH_GPIO1:
+    LDI  gpio.port, 1
+    QBNE CH_GPIO2, gpio.port, p
+    MOV  gpio.reg, GPIO1 | GPIO_DATAOUT
+
+CH_GPIO2:
+    LDI  gpio.port, 2
+    QBNE CH_GPIO3, gpio.port, p
+    MOV  gpio.reg, GPIO2 | GPIO_DATAOUT
+
+CH_GPIO3:
+    LDI  gpio.port, 3
+    QBNE SET_BIT, gpio.port, p
+    MOV  gpio.reg, GPIO3 | GPIO_DATAOUT
+
+SET_BIT:
+    LBBO gpio.data, gpio.reg, 0, 4
+    CLR  gpio.data, b 
+    SBBO gpio.data, gpio.reg, 0, 4
+.endm
+//---------------------------------------------------------
+// pru_gpio_set : Set one of the PRU gpio pins through R30
+// Usage        : pru_gpio_set bit
+//                Sets r30 bit specified in bit.
+//---------------------------------------------------------
+.macro	pru_gpio_set
+.mparam bit
+    SET	r30, r30, bit
+.endm
+//---------------------------------------------------------
+// pru_gpio_clr : Clear one of the PRU gpio pins through R30
+// Usage        : pru_gpio_clr bit
+//                Clears r30 bit specified in bit.
+//---------------------------------------------------------
+.macro	pru_gpio_clr
+.mparam bit
+    CLR	r30, r30, bit
+.endm
+//---------------------------------------------------------
+// delay_ns:
+//---------------------------------------------------------
+.macro delay_ns
+.mparam ns
+    MOV r0, ns
+LOOP_10NS:
+    SUB r0, r0, 10
+    QBLT LOOP_10NS, r0, 10
+.endm
+//---------------------------------------------------------
+// delay_us:
+//---------------------------------------------------------
+.macro delay_us
+.mparam us
+    MOV r0, us
+LOOP2: 
+    LDI r1, 100
+LOOP_10NS:
+    SUB r1, r1, 1
+    QBNE LOOP_10NS, r1, 0
+
+    SUB r0, r0, 1
+    QBNE LOOP2, r0, 0
+.endm
+
+#endif // _PRU_GPIO_HP_
