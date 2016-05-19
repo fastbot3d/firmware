@@ -1,3 +1,5 @@
 # firmware
-This the repo of Firmware for BBP.
+
+How to compile, please see build-script repository.  <br>
+ <br>
 More description: TODO
