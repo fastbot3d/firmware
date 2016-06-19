@@ -2,7 +2,8 @@
 # project source top directory 
 #
 PRJROOT := $(word 1,$(subst unicorn,unicorn ,$(shell pwd)))
-include $(PRJROOT)/build/config.mk
+#include $(PRJROOT)/build/config.mk
+include ./build/config.mk
 
 # this module
 THISMODULE = unicorn
@@ -14,8 +15,8 @@ SRCS = common.c \
 	   thermistor.c \
 	   temp.c \
 	   fan.c \
-	   led.c \
 	   heater.c \
+	   servo.c \
 	   lmsw.c \
 	   stepper.c \
 	   stepper_pruss.c \
@@ -27,9 +28,18 @@ SRCS = common.c \
 	   eeprom.c \
 	   sdcard.c \
 	   parameter.c \
+	   test.c \
+	   mcode_list.c \
 	   printer.c
 
-DEBUG_FLAGS ?= 0x0040
+SRCS += qr_solve.c \
+		vector.c
+
+SRCS += util/Pause.c \
+		util/Fifo.c
+
+DEBUG_FLAGS ?= 0x0000
+#DEBUG_FLAGS ?= 0x1024
 #DEBUG_FLAGS ?= 0xFFFF
 #LOCAL_DEFINES = -g -DD_INIT="$(DEBUG_FLAGS)" -DHOST -DDEBUG
 LOCAL_DEFINES = -g -DD_INIT="$(DEBUG_FLAGS)" -DDEBUG
@@ -41,21 +51,23 @@ REQUIRE_LIBS = -lc -lm -lrt -lpthread -lprussdrv -L../pru_sw/lib
 
 # if this module need to be built as static lib, shared lib, or executable?
 TO_BUILD_STATIC_LIB := 
-TO_BUILD_SHARED_LIB := 
+TO_BUILD_SHARED_LIB :=
 TO_BUILD_EXECUTABLE := 1
 
 # which files need to be install in the root filesystem
-INSTALL_HEADERS = printer.h
+INSTALL_HEADERS = 
 INSTALL_LIBS    = 
 INSTALL_BIN     = 
 
-include $(PRJROOT)/build/rules.mk
+#include $(PRJROOT)/build/rules.mk
+include ./build/rules.mk
 
 # if this module need a simple test program, add these below
 TEST_SUBDIRS = test
 
 PASM?=../pru_sw/utils/pasm
-ASM_FIlE:=pruss_unicorn.p
+ASM_FIlE_BBP1:=./pruss/bbp1/pruss_unicorn.p
+ASM_FIlE_BBP1S:=./pruss/bbp1s/pruss_unicorn.p
 
 .PHONY: test test_clean fw
 test:
@@ -71,6 +83,11 @@ test_clean:
 	done
 
 fw:
-	#${PASM} -V3 -b ${ASM_FIlE}
-	${PASM} -V3 -c ${ASM_FIlE}
+	mkdir -p ./build/target/bin/
+	gcc eeprom_bin.c -o  ./build/target/bin/eeprom
+	./build/target/bin/eeprom ./build/target/bin/
+	${PASM} -V3 -b ${ASM_FIlE_BBP1} build/target/bin/bbp1
+	${PASM} -V3 -c -CBBP1_array ${ASM_FIlE_BBP1}  build/target/bin/bbp1
+	${PASM} -V3 -b ${ASM_FIlE_BBP1S} build/target/bin/bbp1s
+	${PASM} -V3 -c -CBBP1S_array ${ASM_FIlE_BBP1S} build/target/bin/bbp1s
 

@@ -4,6 +4,7 @@
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
@@ -12,30 +13,36 @@
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <math.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <termios.h>
+#include <netinet/in.h>
+#include <getopt.h>
 
-#include "led.h"
-#include "fan.h"
-#include "stepper.h"
-#include "heater.h"
-#include "unicorn.h"
-#include "lmsw.h"
 #include "gcode.h"
+#include "unicorn.h"
 
-#include "printer.h"
+static int mode = FW_MODE_REMOTE;
+static int debug_log = 0;
+static char *file = NULL;
+static FILE *fp = NULL;
 
 static bool quit = false;
-static int quit_blocking = 1;
-
-static pthread_t control_thread;
+static bool stop = false;
+static bool quit_blocking = false;
 
 static void signal_handler(int signal)
 {
-    fprintf(stderr, "Terminating on signal %d\n", signal);
+    printf("Terminating on signal %d\n", signal);
+    syslog(LOG_DEBUG, "Unicorn terminating on signal %d\n", signal);   
     quit = true;
-    quit_blocking = 0;
-    unicorn_stop();
+    quit_blocking = false;
+    unicorn_exit(quit_blocking);
+	exit(0);
 }
 
 int sys_init(void)
@@ -54,24 +61,74 @@ void sys_exit(void)
     signal(SIGTERM, SIG_DFL);
 }
 
-static int usage(const char *prog, const char *msg)
-{
-    if (msg) {
-        fprintf(stderr, "%s\n\n", msg);
-    }
-    
-    fprintf(stderr, "Usage: %s [options] [<gcode-filename>]\n", prog);
+static pthread_t control_thread;
 
-    return 0;
+static void usage(void)
+{
+    printf("Usage: unicorn [option]\n\n"
+            "Options: \n" 
+            "-i | --input    gcode input file\n"
+            "-t | --test     auto test mode\n"
+            "-d | --debug    set debug log level\n"
+            "-h | --help     Print this message\n"
+           );
+}
+
+static void parse_args(int argc, char *argv[])
+{
+    int c;
+    int index; 
+    
+    const char short_option[] = "i:td:h";
+    const struct option long_option[] = {
+        {"input",   required_argument, NULL, 'i'},
+        {"test",    no_argument,       NULL, 't'},
+        {"debug",   required_argument, NULL, 'd'},
+        {"help",    no_argument,       NULL, 'h'},
+        {0,0,0,0},
+    };
+
+    for (;;) {
+        c = getopt_long(argc, argv, short_option, long_option, &index); 
+        if (c == -1) {
+            break; 
+        }
+
+        switch (c) {
+            case 'i':
+                mode = FW_MODE_LOCAL;
+                printf("Running mode: local\n");
+                file = optarg;
+                break;
+
+            case 't':
+                printf("Running mode: testing\n");
+                mode = FW_MODE_TEST;
+                break;
+
+            case 'd':
+                debug_log = atoi(optarg);
+                break;
+
+            case 'h':
+                usage();
+                exit(1);
+
+            default:
+                usage();
+                exit(1);
+        }
+    }
 }
 
 /* The different keys supported on the tty. */
 typedef enum {
-    KEY_NO    = 0,
-    KEY_PAUSE = ' ',
-    KEY_QUIT  = 'q',
-    KEY_UP    = 'k',
-    KEY_DOWN  = 'j',
+    KEY_NO     = 0,
+    KEY_STOP   = 's',
+    KEY_PAUSE  = ' ',
+    KEY_QUIT   = 'q',
+    KEY_UP     = 'k',
+    KEY_DOWN   = 'j',
 } tty_key;
 
 /**
@@ -152,7 +209,8 @@ tty_handle tty_create(tty_attrs *attrs)
 static int validate_key(unsigned char val)
 {
     if (val != KEY_PAUSE && val != KEY_QUIT && val != KEY_UP
-            && val != KEY_DOWN) {
+            && val != KEY_DOWN && val != KEY_STOP) {
+        printf("key invalid\n");
         return -1;
     }
     return 0;
@@ -221,6 +279,19 @@ void *control_thread_worker(void *arg)
 
         switch (key) 
         {
+        case KEY_QUIT:
+            printf("Quit...\n");
+            quit = true;
+            quit_blocking = false;
+            break;
+
+        case KEY_STOP:
+            printf("Stop...\n");
+            stop = true;
+            quit_blocking = false;
+            unicorn_stop(quit_blocking);
+            break; 
+
         case KEY_PAUSE:
             if (!pause) {
                 printf("Pause...\n");
@@ -233,21 +304,20 @@ void *control_thread_worker(void *arg)
             }
             break;
 
-        case KEY_QUIT:
-            printf("Quit...\n");
-            quit = true;
-            quit_blocking = 0;
-            unicorn_stop();
-            break;
-        
         case KEY_UP:
             multiply += 10;
-            gcode_set_feed(multiply);
+            if (multiply > 2000) {
+                multiply = 2000;
+            }
+            unicorn_set_feedrate(multiply);
             break;
 
         case KEY_DOWN:
             multiply -= 10;
-            gcode_set_feed(multiply);
+            if (multiply < 10) {
+                multiply = 10;
+            }
+            unicorn_set_feedrate(multiply);
             break;
 
         case KEY_NO:
@@ -258,7 +328,7 @@ void *control_thread_worker(void *arg)
         }
         
         if (key == KEY_QUIT) {
-            break;
+            goto cleanup;
         }
 
         /* Sleep for a while */
@@ -266,60 +336,261 @@ void *control_thread_worker(void *arg)
     }
 
 cleanup:
-    printf("Leaving Control thread\n");
     tty_delete(htty); 
 
+    printf("Leaving Control thread\n");
     pthread_exit(NULL);
 }
 
-int main(int argc, char *argv[])
+int control_init(void)
 {
-    int ret;
-    char *ptr = NULL;
-
-    fprintf(stderr, "Unicron 3D printer firmware\n");
-    
-    if (optind >= argc) {
-        usage(argv[0], "No <gcode-filename>!!");
-        return -1;
-    } 
-
-    FILE *fp = fopen(argv[1], "r");
-    if (!fp) { 
-        return -1;
-    }
-
-    sys_init();
-    unicorn_init();
-
+    int ret = 0;
+    printf("Create control thread\n");
     ret = sub_sys_thread_create("control", 
                                 &control_thread, 
                                 NULL, 
                                 &control_thread_worker, 
                                 NULL);
     if (ret) {
-        return -1;
+        printf("create control thread err\n");
+        ret = -1;
     } 
 
-    unicorn_start();
+    return ret;
+}
+
+void control_exit(void)
+{
+    quit = true;
+
+    pthread_join(control_thread, NULL);
+}
+
+int read_fd = -1;
+int write_fd = -1;
+int read_emerg_fd = -1;
+#define SERVER_RD_PORT 50002
+#define SERVER_WR_PORT 50012
+#define SERVER_WR_EMERG_PORT 50013
+int server_start(void)
+{
+    int ret = 0;
+    int opt = 1;
+    int read_sock = -1; 
+    int write_sock = -1;
+    int read_emerg_sock = -1;
+    struct sockaddr_in read_addr;
+    struct sockaddr_in write_addr;
+    struct sockaddr_in read_emerg_addr;
+    socklen_t addr_len;
+
+    if ((read_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+        printf("create read socket error...\n");
+        return false;
+    }
+    if ((write_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+        printf("create write socket error...\n");
+        return false;
+    }
+    if ((read_emerg_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+        printf("create write socket error...\n");
+        return false;
+    }
+
+    ret = setsockopt(read_sock, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
+    if (ret == -1) {
+        printf("set read socket error...\n");
+        return false;
+    }
+    ret = setsockopt(write_sock, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
+    if (ret == -1) {
+        printf("set write socket error...\n");
+        return false;
+    }
+    ret = setsockopt(read_emerg_sock, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
+    if (ret == -1) {
+        printf("set write emergency socket error...\n");
+        return false;
+    }
+
+    bzero(&read_addr, sizeof(struct sockaddr_in));
+    read_addr.sin_family = AF_INET;
+    read_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    read_addr.sin_port = htons(SERVER_RD_PORT);
+    if(bind(read_sock, (struct sockaddr *)&(read_addr), sizeof(struct sockaddr_in)) == -1){
+        printf("bind read sock error...\n");
+        return false;
+    }
+
+    bzero(&write_addr, sizeof(struct sockaddr_in));
+    write_addr.sin_family = AF_INET;
+    write_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    write_addr.sin_port = htons(SERVER_WR_PORT);
+    if(bind(write_sock, (struct sockaddr *)&(write_addr), sizeof(struct sockaddr_in)) == -1) {
+        printf("bind write sock error...\n");
+        return false;
+    }
+    bzero(&read_emerg_addr, sizeof(struct sockaddr_in));
+	read_emerg_addr.sin_family = AF_INET;
+	read_emerg_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	read_emerg_addr.sin_port = htons(SERVER_WR_EMERG_PORT);
+	if(bind(read_emerg_sock, (struct sockaddr *)&(read_emerg_addr), sizeof(struct sockaddr_in)) == -1) {
+        printf("bind write sock error...\n");
+        return false;
+    }
+
+    printf("start to listen... \n");
+	listen(read_sock, 1);
+	listen(write_sock, 1);
+	listen(read_emerg_sock, 1);
+
+	fd_set fds;
+	FD_ZERO(&fds);
+	FD_SET(read_sock,  &fds);
+	FD_SET(write_sock, &fds);
+	FD_SET(read_emerg_sock, &fds);
+
+	struct timeval timeout;
+	timeout.tv_sec = 5;
+	timeout.tv_usec = 0;
+
+	int max_fd = write_sock > read_sock ? write_sock : read_sock;
+	max_fd = max_fd > read_emerg_sock ? max_fd : read_emerg_sock;
 
     while (!quit) 
     {
-        ptr = gcode_get_line_from_file(fp);
-        if (!ptr) {
-            quit = true;
-            pthread_cancel(control_thread);
-            quit_blocking = 1;
-            unicorn_stop();
-            break;
-        }
+		int rc = select(max_fd + 1, &fds, 0, 0, &timeout);
+		if (rc < 0) {
+			if(errno == EINTR){
+				printf("select errno == EINTR\n");
+				continue;
+			}
+			printf("select err, break ????\n");
+			break;
+		} else if (rc >0 && FD_ISSET(read_sock, &fds)) {
+    		printf("accpet read sock\n");
+			read_fd = accept(read_sock, (struct sockaddr *)&read_addr, &addr_len);
+		} else if (rc >0 && FD_ISSET(write_sock, &fds)) {
+    		printf("accpet write sock\n");
+			write_fd = accept(write_sock, (struct sockaddr *)&write_addr, &addr_len);
+		} else if (rc >0 && FD_ISSET(read_emerg_sock, &fds)) {
+    		printf("accpet write emergency sock\n");
+			read_emerg_fd = accept(read_emerg_sock, (struct sockaddr *)&read_emerg_addr, &addr_len);
+		} else {
+			FD_ZERO(&fds);
+			FD_SET(read_sock,  &fds);
+			FD_SET(write_sock, &fds);
+			FD_SET(read_emerg_sock, &fds);
 
-        gcode_process_line();
+			timeout.tv_sec = 5;
+			timeout.tv_usec = 0;
+			continue;
+		}
+        
+        if (read_fd > 0 && write_fd > 0 && read_emerg_fd >0) {
+            unicorn_start(read_fd, write_fd, read_emerg_fd);
+        }
+	}
+
+	if (read_sock > 0) {
+    	close(read_sock);
+    }
+
+	if (write_sock > 0) {
+    	close(write_sock);
+    }
+
+	if (read_emerg_sock > 0) {
+    	close(read_emerg_sock);
+    }
+
+	if (read_fd > 0) {
+    	close(read_fd);
+    }
+	if (write_fd > 0) {
+    	close(write_fd);
+    }
+	if (read_emerg_fd > 0) {
+    	close(read_emerg_fd);
+    }
+
+    printf("exit \n");
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    printf("Unicron: 3D printer firmware\n");
+    parse_args(argc, argv);
+    
+    /* Check mode validity */
+    if (mode <= FW_MODE_MIN || mode >= FW_MODE_MAX) {
+        printf("Not supported unicorn fw mode %d\n", mode);
+        exit(1);
+    } else {
+        unicorn_set_mode(mode);
+    }
+
+    if (mode == FW_MODE_REMOTE) {
+        printf("Running mode: testing\n");
+    }
+
+    if (mode == FW_MODE_LOCAL) {
+        /* Check gcode file validy */
+        if (access(file, R_OK) < 0) {
+            printf("Gcode file is not able to read, please check %s!\n", 
+                    file);
+            exit(1);
+        }
+        fp = fopen(file, "r");
+        if (!fp) {
+            exit(1);
+        }
+    }
+
+    sys_init();
+
+	if (mode != FW_MODE_REMOTE) {
+    	control_init();
+	}
+
+    unicorn_init();
+    
+    if (mode == FW_MODE_REMOTE) {
+        server_start();
+    } else if (mode == FW_MODE_TEST) {
+        unicorn_test();
+    } else if (mode == FW_MODE_LOCAL) {
+        unicorn_start(0, 0, 0);
+
+        char *ptr = NULL;
+        while (!quit) {
+            ptr = gcode_get_line_from_file(fp);
+            if (!ptr) {
+                quit = true;
+                quit_blocking = true;
+                break;
+            } else {
+                gcode_process_line_from_file();
+            }
+        }
     }
     
-    pthread_join(control_thread, NULL);
+    printf("Quit from printer\n");
+    quit = true;    
     
+    if (!stop) { 
+        unicorn_stop(quit_blocking);
+    }
+
     unicorn_exit(quit_blocking);
+    
+    if (mode == FW_MODE_LOCAL) {
+        if (fp) {
+            fclose(fp);
+        }
+    }
+
     sys_exit();
 
     return 0;

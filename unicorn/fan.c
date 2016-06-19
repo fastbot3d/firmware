@@ -13,6 +13,7 @@
 typedef struct {
     channel_tag  id;
     channel_tag  pwm;
+    unsigned int gpio;
     unsigned int level;
 } fan_t;
 
@@ -29,10 +30,8 @@ static int fan_index_lookup(channel_tag fan)
         }
     }
 
-    if (DBG(D_FAN)) {
-        fprintf(stderr, "fan_index_lookup failed for '%s'\n",
-                tag_name(fan));
-    }
+	printf("fan_index_lookup failed for '%s'\n",
+			tag_name(fan));
     return -1;
 }
 
@@ -50,13 +49,20 @@ channel_tag fan_lookup_by_name(const char *name)
     return NULL;
 }
 
+channel_tag fan_lookup_by_index(int idx) 
+{
+    if (idx >= 0 || idx < nr_fans) {
+        return fans[idx].id; 
+    } else {
+        return NULL;
+    }
+}
+
 int fan_config(fan_config_t *pcfgs, int nr_cfgs)
 {
     int i;
 
-    if (DBG(D_FAN)) {
-        printf("fan_config called with %d records\n", nr_cfgs);
-    }
+    FAN_DBG("fan_config called with %d records\n", nr_cfgs);
     
     if (!pcfgs || nr_cfgs <= 0) {
         return -1;
@@ -73,8 +79,9 @@ int fan_config(fan_config_t *pcfgs, int nr_cfgs)
         fan_t *pd = &fans[i];
         fan_config_t *ps = &pcfgs[i];
         
-        pd->pwm   = ps->pwm;
         pd->id    = ps->tag;  
+        pd->pwm   = ps->pwm;
+        pd->gpio  = ps->gpio;
         pd->level = ps->level; 
         
         nr_fans++;
@@ -85,12 +92,24 @@ int fan_config(fan_config_t *pcfgs, int nr_cfgs)
 
 int fan_init(void)
 {
-    if (DBG(D_FAN)) {
-        printf("fan_init called.\n");
-    }
+    int i;
+
+    FAN_DBG("fan_init called.\n");
     
     if (!fans || nr_fans <= 0) {
         return -1;
+    }
+
+    for (i = 0; i < nr_fans; i++) {
+        fan_t *pd = &fans[i];
+
+        if (pd->gpio) { 
+			FAN_DBG("%s request gpio %d\n", pd->id, pd->gpio);
+
+            gpio_request_sysfs(pd->gpio);
+            gpio_write_sysfs(pd->gpio, "direction", "out");
+            gpio_write_sysfs(pd->gpio, "value", "0");
+        } 
     }
 
     return 0;
@@ -98,17 +117,23 @@ int fan_init(void)
 
 void fan_exit(void)
 {
-    if (DBG(D_FAN)) {
-        printf("fan_exit called.\n");
-    }
+    FAN_DBG("fan_exit called.\n");
     
     if (fans) {
         int i;
         for (i = 0; i < nr_fans; i++) { 
             fan_t *pd = &fans[i];
-            if (pwm_get_state(pd->pwm) == PWM_STATE_ON) {
-                pwm_set_output(pd->pwm, 0);
-                pwm_disable(pd->pwm);
+            if (pd->pwm) {
+                if (pwm_get_state(pd->pwm) == PWM_STATE_ON) {
+                    pwm_set_output(pd->pwm, 0);
+                    pwm_disable(pd->pwm);
+                }
+            }
+
+            if (pd->gpio) {
+				FAN_DBG("%s, free gpio %d\n", pd->id, pd->gpio);
+				gpio_write_sysfs(pd->gpio, "value", "0");
+                gpio_free_sysfs(pd->gpio);
             }
         }
 
@@ -123,9 +148,7 @@ int fan_enable(channel_tag fan)
     int idx = -1;
     fan_t *pd = NULL;
 
-    if (DBG(D_FAN)) {
-        printf("fan_enable: %s\n", fan);
-    }
+	FAN_DBG("fan_enable: %s\n", fan);
 
     idx = fan_index_lookup(fan);
     if (idx < 0) {
@@ -133,13 +156,19 @@ int fan_enable(channel_tag fan)
     }
 
     pd = &fans[idx];
-    
-    if (pwm_get_state(pd->pwm) == PWM_STATE_OFF) {
-        pwm_enable(pd->pwm); 
-        if (pd->level > 0 && pd->level <= 100) {
-            pwm_set_output(pd->pwm, pd->level);
+    if (pd->pwm) { 
+        if (pwm_get_state(pd->pwm) == PWM_STATE_OFF) {
+            pwm_enable(pd->pwm); 
+            if (pd->level > 0 && pd->level <= 100) {
+                pwm_set_output(pd->pwm, pd->level);
+            }
         }
     }
+
+    if (pd->gpio) {
+        gpio_write_sysfs(pd->gpio, "value", "1");
+    }
+
     return 0;
 }
 /*
@@ -150,9 +179,7 @@ int fan_disable(channel_tag fan)
     int idx = -1;
     fan_t *pd = NULL;
 
-    if (DBG(D_FAN)) {
-        printf("fan_disable: %s\n", fan);
-    }
+	FAN_DBG("fan_disable: %s\n", fan);
 
     idx = fan_index_lookup(fan);
     if (idx < 0) {
@@ -160,10 +187,16 @@ int fan_disable(channel_tag fan)
     }
 
     pd = &fans[idx];
-    
-    if (pwm_get_state(pd->pwm) == PWM_STATE_ON) {
-        pwm_set_output(pd->pwm, 0);
-        pwm_disable(pd->pwm); 
+
+    if (pd->pwm) { 
+        if (pwm_get_state(pd->pwm) == PWM_STATE_ON) {
+            pwm_set_output(pd->pwm, 0);
+            pwm_disable(pd->pwm); 
+        }
+    }
+
+    if (pd->gpio) {
+        gpio_write_sysfs(pd->gpio, "value", "0");
     }
 
     return 0;
@@ -176,9 +209,7 @@ int fan_set_level(channel_tag fan, unsigned int level)
     int idx = -1;
     fan_t *pd = NULL;
 
-    if (DBG(D_FAN)) {
-        printf("fan_set_level: %s -> %d\n", fan, level);
-    }
+	FAN_DBG("fan_set_level: %s -> %d\n", fan, level);
 
     idx = fan_index_lookup(fan);
     if (idx < 0 || level > 100) {
@@ -189,12 +220,12 @@ int fan_set_level(channel_tag fan, unsigned int level)
 
     if (pd->level != level) {
         pd->level = level;
-        pwm_set_output(pd->pwm, pd->level);
-    } else {
-        if (DBG(D_FAN)) {
-            printf("%s is already at level %d\n", fan, level);
+        if (pd->pwm) {
+            pwm_set_output(pd->pwm, pd->level);
         }
-    }
+    } else {
+		FAN_DBG("%s is already at level %d\n", fan, level);
+	}
 
     return 0;
 }
@@ -208,15 +239,14 @@ int fan_get_level(channel_tag fan, unsigned int *level)
 
     idx = fan_index_lookup(fan);
     if (idx < 0) {
+        printf("[Fan]: lookup %s err\n", fan);
         return -1;
     }
 
     pd = &fans[idx];
     *level = pd->level;
 
-    if (DBG(D_FAN)) {
-        printf("fan_get_level: %s -> %d\n", fan, *level);
-    }
+	FAN_DBG("fan_get_level: %s -> %d\n", fan, *level);
 
     return 0;
 }

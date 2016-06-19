@@ -13,9 +13,9 @@ extern unsigned short virtual_steps_x;
 extern unsigned short virtual_steps_y;
 extern unsigned short virtual_steps_z;
 
-extern signed short feedrate;
-extern signed short next_feedrate;
-extern signed short saved_feedrate;
+extern float feedrate;
+extern float next_feedrate;
+extern float saved_feedrate;
 
 extern unsigned char is_homing;
 
@@ -33,7 +33,12 @@ extern unsigned char is_homing;
  * are as specified in the source g-code and may never actually be reached 
  * if acceleration management is active.
  */
+
+#define BLOCK_M_CMD   	1<<1
+#define BLOCK_G_CMD   	1<<0
+#define BLOCK_NONE_CMD  0
 typedef struct {
+    unsigned char type; //M gcmd = 1, other is 0
     /* Fields used by the bresenham algorithm for the tracing the line */
     long steps_x;                      // Step count along each axis
     long steps_y;
@@ -67,18 +72,16 @@ typedef struct {
 #if defined (__cplusplus)
 extern "C" {
 #endif
-
 /*
  * Initialize and delete the motion plan subsystem
  */
 extern int  plan_init(void);
 extern void plan_exit(void);
-
 /*
  * Stop Planner
  */
+extern void plan_start(void);
 extern void plan_stop(void);
-
 /*
  * Add a new linear movement to the buffer.
  * x, y and z is the signed, absolute target position in millimaters.
@@ -86,29 +89,26 @@ extern void plan_stop(void);
  */
 extern void plan_buffer_line(float x, float y, float z, const float e, 
                              float feed_rate, const uint8_t extruder);
-
 /* 
  * Get the current block, Return NULL if buffer empty 
  */
 extern block_t *plan_get_current_block(void);
-
 /*
  * Discard current block
  */
 extern void plan_discard_current_block(void);
-
 /*
  * Get current filled block size
  */
 extern int plan_get_block_size(void);
-
 /*
  * Set position
  * Used for G92 instructions.
  */
-void plan_set_position(float x, float y, float z, const float e);
-
-void plan_set_e_position(const float e);
+extern void plan_set_position(float x, float y, float z, const float e);
+extern void plan_set_position_no_delta_autolevel(float x, float y, float z, const float e);
+extern void plan_set_e_position(const float e);
+extern void put_mcode_to_fifo();
 
 #if defined (__cplusplus)
 }

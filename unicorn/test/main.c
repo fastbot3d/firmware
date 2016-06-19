@@ -11,9 +11,6 @@
 #include <signal.h>
 #include <errno.h>
 
-#include <unicorn/printer.h>
-
-
 int main(int argc, char *argv[])
 {
     fprintf(stderr, "Unicron 3D printer firmware\n");

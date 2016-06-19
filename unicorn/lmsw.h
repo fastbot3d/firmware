@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 extern int wait_lmsw_min(axis_e axis);
+extern int wait_lmsw_min_test(axis_e axis);
 extern int wait_lmsw_max(axis_e axis);
 
 extern int lmsw_init(void);

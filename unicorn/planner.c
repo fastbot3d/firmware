@@ -1,8 +1,8 @@
 /*
  * Unicorn 3D Printer Firmware
  * planner.c
+ * Buffers movement commands and manages the acceleration profile plan
 */
-
 /*  
  * Reasoning behind the mathematics in this module (in the key of 'Mathematica'):
  * s == speed, a == acceleration, t == time, d == distance
@@ -43,25 +43,44 @@
 #include "unicorn.h"
 #include "planner.h"
 #include "stepper.h"
+#include "stepper_pruss.h"
+
+#include "util/Fifo.h"
+#include "util/Pause.h"
+#ifdef AUTO_LEVELING
+#include "vector.h"
+#ifdef AUTO_LEVELING_GRID
+#include "qr_solve.h"
+#endif
+#endif
+
 
 static bool stop = false;
+static bool thread_quit = false;
+static pthread_t planner_thread;
+extern matrix_t plan_bed_level_matrix;
 
 /*
  * Public variables
  */ 
-int extrudemultiply = 100;
+extern int extrudemultiply;
+extern int extruder_multiply[MAX_EXTRUDER];
 
 /* everything with less than this number of steps will be ignored 
  * as move and joined with the next movement */
+#ifdef DELTA
+const unsigned int dropsegments = 1;
+#else
 const unsigned int dropsegments = 5;
+#endif
 
 unsigned long axis_steps_per_sqr_second[NUM_AXIS];
 
 /*
  * Semi-private variables, used in inline functions
  */
-#define BLOCK_BUFFER_SIZE 32
-#define BLOCK_BUFFER_MASK 0x1f
+//lkj #define BLOCK_BUFFER_SIZE 16
+#define BLOCK_BUFFER_SIZE 64
 
 /* A ring buffer for motion instructions */
 block_t block_buffer[BLOCK_BUFFER_SIZE];   
@@ -74,7 +93,7 @@ volatile unsigned char block_buffer_tail;
 
 /* The current position of the tool in absolute steps */
 /* rescaled from extern when axis_steps_per_unit are changed by gcode */
-long position[4];                         
+long position[4]={0};                         
 
 /* Speed of previous path line segment */
 static float previous_speed[4];           
@@ -82,6 +101,7 @@ static float previous_speed[4];
 /* Nominal speed of previous path line segment */
 static float previous_nominal_speed;      
 
+//static float last_E_axis_steps_per_unit = 0;
 /*
  * Returns the index of the next block in the ring buffer
  */
@@ -151,11 +171,11 @@ static void calculate_trapezoid_for_block(block_t *block, float entry_factor, fl
     final_rate   = ceil(block->nominal_rate * exit_factor);  // step/s
     
     /* Limit minimal step rate, otherwisw the timer will overflow. */
-    if (initial_rate < 120) {
-        initial_rate = 120;
+    if (initial_rate < 60) { //120
+        initial_rate = 60;
     }
-    if (final_rate < 120) {
-        final_rate = 120;
+    if (final_rate < 60) {
+        final_rate = 60;
     }
 
     long acceleration = block->acceleration_st;
@@ -181,6 +201,12 @@ static void calculate_trapezoid_for_block(block_t *block, float entry_factor, fl
     /* Calculate the size of Plateau of Nominal Rate */
     int32_t plateau_steps = block->step_event_count - accelerate_steps - decelerate_steps;
 
+	if (decelerate_steps < 0) {
+		//printf("lkj plan  1 block->nominal_rate:%ld, final_rate:%ld, acceleration:%ld, decelerate_steps:%d \n", 
+	//				block->nominal_rate, final_rate, acceleration, decelerate_steps);
+	//	printf("lkj plan 2  plateau_steps:%u, block->step_event_count:%lu, accelerate_steps:%u, decelerate_steps:%d \n", 
+	//			plateau_steps,  block->step_event_count, accelerate_steps, decelerate_steps);
+    }
     /* Is the Plateau of Nominal Rate smaller than nothing?
      * That means no cruising, and we will have intersection_distance() to calculate 
      * when to abort acceleration and start braking in order to reach the final_rate 
@@ -261,7 +287,9 @@ static void planner_reverse_pass(void)
 {
     uint8_t block_index = block_buffer_head;
     
-    /* Make a local copy of block_buffer_tail, because the interrupt can alter it */
+    /* Make a local copy of block_buffer_tail, 
+     * because the planner thread can alter it 
+     */
     unsigned char tail = block_buffer_tail; 
 
     if (((block_buffer_head - tail + BLOCK_BUFFER_SIZE) & (BLOCK_BUFFER_SIZE - 1)) > 3) {
@@ -357,6 +385,8 @@ static void planner_recalculate_trapezoids(void)
         block_index = next_block_index(block_index);
     }
 
+#if 0
+    //FIXME  Truby 2015-06-21
     /* Last/newest block in buffer.
      * Exit speed is set with MINIMUM_PLANNER_SPEED.
      * Always recalculated.
@@ -365,8 +395,10 @@ static void planner_recalculate_trapezoids(void)
         calculate_trapezoid_for_block(next, 
                                       next->entry_speed / next->nominal_speed,
                                       MINIMUM_PLANNER_SPEED / next->nominal_speed);
-        next->recalculate_flag = false;
+        //next->recalculate_flag = false;
+        next->recalculate_flag = true;
     }
+#endif
 }
 /* 
  * Recalculates the motion plan according to the following algorithm:
@@ -394,32 +426,6 @@ static void planner_recalculate(void)
     planner_recalculate_trapezoids();
 }
 /*
- * Init the planner sub system
- */
-int plan_init(void)
-{
-    int i;
-    
-    for (i = 0; i < NUM_AXIS; i++) {
-        axis_steps_per_sqr_second[i] = pa.max_acceleration_units_per_sq_second[i] 
-                                       * pa.axis_steps_per_unit[i];
-    }
-
-    /* clear position */
-    memset(position, 0, sizeof(position));
-
-    block_buffer_head = 0;
-    block_buffer_tail = 0;
-    
-    previous_speed[0] = 0.0;
-    previous_speed[1] = 0.0;
-    previous_speed[2] = 0.0;
-    previous_speed[3] = 0.0;
-    
-    previous_nominal_speed = 0.0;
-    return 0;
-}
-/*
  * Add a new linear movement to the buffer.
  * x, y and z is the signed, absolute target position in millimeters.
  * Feed rate specfies the speed of the motion.
@@ -435,17 +441,24 @@ void plan_buffer_line(float x, float y, float z, const float e,
     /* Calculate the buffer head after we push this byte */
     int next_buffer_head = next_block_index(block_buffer_head);
 
+    /* FIXME: here!!!!!!! */
     while (block_buffer_tail == next_buffer_head) {
         /* waste so many cpu resource here */
-        usleep(1000);
+        usleep(10);
         if (stop) {
             break;
         }
     }
-    
+
     if (stop) {
         return;
     }
+
+	if ((pa.machine_type != MACHINE_DELTA) && pa.autoLeveling) {
+        apply_rotation_xyz(plan_bed_level_matrix, &x, &y, &z);  
+		debug_matrix(&plan_bed_level_matrix);
+    }
+
 
     /*---------------------------------------------------------
      * 1. Calculate the target position in absolute steps 
@@ -454,30 +467,31 @@ void plan_buffer_line(float x, float y, float z, const float e,
     target[X_AXIS] = lround(x * pa.axis_steps_per_unit[X_AXIS]);
     target[Y_AXIS] = lround(y * pa.axis_steps_per_unit[Y_AXIS]);
     target[Z_AXIS] = lround(z * pa.axis_steps_per_unit[Z_AXIS]);
-    target[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS]);
+    target[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS + extruder]);
     
     /* Prepare to set up new block */
-    block_t *block = &block_buffer[block_buffer_head]; 
+    block_t *block = NULL;
+    block = &block_buffer[block_buffer_head]; 
 
     /* Mark block as not busy, (Not executed by the stepper thread) */
     block->busy = false;
+	block->type = BLOCK_G_CMD;
 
-    /* Number of steps for each axis */
-#ifndef COREXY
-    /* default non-h-bot planning */
-    block->steps_x = labs(target[X_AXIS] - position[X_AXIS]);
-    block->steps_y = labs(target[Y_AXIS] - position[Y_AXIS]);
-#else
-    /* corexy planning 
-     * these equations follow the form of the dA and dB equations on
-     * http://www.corexy.com/theory.html
-     */
-    block->steps_x = labs((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]));
-    block->steps_y = labs((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]));
-#endif
+	if (pa.machine_type == MACHINE_COREXY) {
+        block->steps_x = labs((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]));
+        block->steps_y = labs((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]));
+    } else {
+        block->steps_x = labs(target[X_AXIS] - position[X_AXIS]);
+        block->steps_y = labs(target[Y_AXIS] - position[Y_AXIS]);
+    }
     
     block->steps_z = labs(target[Z_AXIS] - position[Z_AXIS]);
-    block->steps_e = labs(target[E_AXIS] - position[E_AXIS]);
+	{
+		//if (last_E_axis_steps_per_unit != 0) {
+		//	position[E_AXIS] = position[E_AXIS] * last_E_axis_steps_per_unit / pa.axis_steps_per_unit[E_AXIS + extruder];
+		//}
+    	block->steps_e = labs(target[E_AXIS] - position[E_AXIS]);
+	}
     block->steps_e *= extrudemultiply;
     block->steps_e /= 100;
 
@@ -497,21 +511,21 @@ void plan_buffer_line(float x, float y, float z, const float e,
      ---------------------------------------------------------*/
     block->direction_bits = 0;
 
-#ifndef COREXY
-    if (target[X_AXIS] < position[X_AXIS]) {
-        block->direction_bits |= (1 << X_AXIS);
+	if (pa.machine_type == MACHINE_COREXY) {
+        if ((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]) < 0) { 
+            block->direction_bits |= (1 << X_AXIS);
+        }
+        if ((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]) < 0) {
+            block->direction_bits |= (1 << Y_AXIS);
+        }
+    } else {
+        if (target[X_AXIS] < position[X_AXIS]) {
+            block->direction_bits |= (1 << X_AXIS);
+        }
+        if (target[Y_AXIS] < position[Y_AXIS]) {
+            block->direction_bits |= (1 << Y_AXIS);
+        }
     }
-    if (target[Y_AXIS] < position[Y_AXIS]) {
-        block->direction_bits |= (1 << Y_AXIS);
-    }
-#else
-    if ((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]) < 0) { 
-        block->direction_bits |= (1 << X_AXIS);
-    }
-    if ((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]) < 0) {
-        block->direction_bits |= (1 << Y_AXIS);
-    }
-#endif
 
     if (target[Z_AXIS] < position[Z_AXIS]) {
         block->direction_bits |= (1 << Z_AXIS);
@@ -524,35 +538,7 @@ void plan_buffer_line(float x, float y, float z, const float e,
     block->active_extruder = extruder;
 
     /*---------------------------------------------------------
-     * 3. enable active axis 
-     ---------------------------------------------------------*/
-#ifdef COREXY 
-    if ((block->steps_x != 0) || (block->steps_y != 0)) {
-        //stepper_enable(X_AXIS);
-        //stepper_enable(Y_AXIS);
-    }
-#else
-    if (block->steps_x != 0) {
-        //stepper_enable(X_AXIS);
-    }
-    if (block->steps_y != 0) {
-        //stepper_enable(Y_AXIS);
-    }
-#endif
-
-    if (block->steps_z != 0) {
-        //stepper_enable(Z_AXIS);
-    }
-
-    if (block->steps_e != 0) {
-        //stepper_enable(E_AXIS);
-    }
-
-    //FIXME   
-    //stepper_update();
-
-    /*---------------------------------------------------------
-     * 4. Calculate speed
+     * 3. Calculate speed
      ---------------------------------------------------------*/
     if (block->steps_e == 0) {
         if (feed_rate < pa.mintravelfeedrate) {
@@ -564,37 +550,29 @@ void plan_buffer_line(float x, float y, float z, const float e,
         }
     } 
     
-    int moves_queued = (block_buffer_head - block_buffer_tail + BLOCK_BUFFER_SIZE)
-                       & (BLOCK_BUFFER_SIZE - 1);
-    
-#ifdef SLOWDOWN
-    if ((moves_queued > 1) && (moves_queued < (BLOCK_BUFFER_SIZE * 0.5))) {
-        feed_rate = feed_rate * moves_queued / (BLOCK_BUFFER_SIZE * 0.5);
-    }
-#endif
-
     float delta_mm[4];
-#ifndef COREXY
-    delta_mm[X_AXIS] = (target[X_AXIS] - position[X_AXIS]) / pa.axis_steps_per_unit[X_AXIS];
-    delta_mm[Y_AXIS] = (target[Y_AXIS] - position[Y_AXIS]) / pa.axis_steps_per_unit[Y_AXIS];
-#else
-    delta_mm[X_AXIS] = ((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]))
-                       / pa.axis_steps_per_unit[X_AXIS];
-    delta_mm[Y_AXIS] = ((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]))
-                       / pa.axis_steps_per_unit[Y_AXIS];
-#endif
+
+	if (pa.machine_type == MACHINE_COREXY) {
+        delta_mm[X_AXIS] = ((target[X_AXIS] - position[X_AXIS]) + (target[Y_AXIS] - position[Y_AXIS]))
+            / pa.axis_steps_per_unit[X_AXIS];
+        delta_mm[Y_AXIS] = ((target[X_AXIS] - position[X_AXIS]) - (target[Y_AXIS] - position[Y_AXIS]))
+            / pa.axis_steps_per_unit[Y_AXIS];
+    } else {
+        delta_mm[X_AXIS] = (target[X_AXIS] - position[X_AXIS]) / pa.axis_steps_per_unit[X_AXIS];
+        delta_mm[Y_AXIS] = (target[Y_AXIS] - position[Y_AXIS]) / pa.axis_steps_per_unit[Y_AXIS];
+    }
     
     delta_mm[Z_AXIS] = (target[Z_AXIS] - position[Z_AXIS]) / pa.axis_steps_per_unit[Z_AXIS];
-    delta_mm[E_AXIS] = ((target[E_AXIS] - position[E_AXIS]) / pa.axis_steps_per_unit[E_AXIS])
+    delta_mm[E_AXIS] = ((target[E_AXIS] - position[E_AXIS]) / pa.axis_steps_per_unit[E_AXIS + block->active_extruder])
                        * extrudemultiply / 100.0;
     
     if (block->steps_x <= dropsegments && block->steps_y <= dropsegments 
             && block->steps_z <= dropsegments) {
         block->millimeters = fabs(delta_mm[E_AXIS]);
     } else {
-        block->millimeters = sqrtf(powf(delta_mm[X_AXIS], 2)
-                                  + powf(delta_mm[Y_AXIS], 2)
-                                  + powf(delta_mm[Z_AXIS], 2));
+        block->millimeters = sqrtf(powf(delta_mm[X_AXIS], 2.0)
+                                  + powf(delta_mm[Y_AXIS], 2.0)
+                                  + powf(delta_mm[Z_AXIS], 2.0));
     }
     
     /* Inverse millimeters to remove multiple divides */
@@ -605,6 +583,32 @@ void plan_buffer_line(float x, float y, float z, const float e,
      */
     float inverse_second = feed_rate * inverse_millimeters;
     
+    int moves_queued = (block_buffer_head - block_buffer_tail + BLOCK_BUFFER_SIZE)
+                       & (BLOCK_BUFFER_SIZE - 1);
+    
+//#ifdef SLOWDOWN
+#if 0
+    /*
+    if ((moves_queued > 1) && (moves_queued < (BLOCK_BUFFER_SIZE * 0.5))) {
+        feed_rate = feed_rate * moves_queued / (BLOCK_BUFFER_SIZE * 0.5);
+    }
+    */
+
+    /* TODO: 
+     * Add advanced slow down 
+     * check the pru queue filled length, if empty, slow down!
+     */
+    unsigned long segment_time = lround(1000000.0/inverse_second); 
+    unsigned int queue_len = stepper_get_queue_len();
+    if ((queue_len > 1) && (queue_len < (QUEUE_LEN / 2))) {
+        if (segment_time < pa.minsegmenttime) {
+            printf("Slow down...\n");
+            inverse_second = 1000000.0 / 
+                (segment_time + lround(2 * (pa.minsegmenttime - segment_time) / queue_len));
+        }
+    }
+#endif
+
     block->nominal_speed = block->millimeters * inverse_second;           /* (mm/sec) Always > 0 */
     block->nominal_rate = ceil(block->step_event_count * inverse_second); /* (step/sec) Always > 0 */
 
@@ -648,20 +652,20 @@ void plan_buffer_line(float x, float y, float z, const float e,
             block->acceleration_st = axis_steps_per_sqr_second[Y_AXIS];
         }
 
-        if(((float)block->acceleration_st * (float)block->steps_z / (float)block->step_event_count ) 
-                > axis_steps_per_sqr_second[Z_AXIS]) {
-            block->acceleration_st = axis_steps_per_sqr_second[Z_AXIS];
-        }
-
         if(((float)block->acceleration_st * (float)block->steps_e / (float)block->step_event_count) 
                 > axis_steps_per_sqr_second[E_AXIS]) {
             block->acceleration_st = axis_steps_per_sqr_second[E_AXIS];
+        }
+
+        if(((float)block->acceleration_st * (float)block->steps_z / (float)block->step_event_count ) 
+                > axis_steps_per_sqr_second[Z_AXIS]) {
+            block->acceleration_st = axis_steps_per_sqr_second[Z_AXIS];
         }
     }
     
     block->acceleration = block->acceleration_st / steps_per_mm;
     
-    //FIXME 
+    //FIXME : Do not needed!
     block->acceleration_rate = (long)((float)block->acceleration_st * 8.388608);
 
     /* Start with a safe speed */
@@ -722,18 +726,18 @@ void plan_buffer_line(float x, float y, float z, const float e,
      * the maximum junction speed and may always be ignored for any speed reduction checks.
      */
     if (block->nominal_speed <= v_allowable) { 
-        block->nominal_length_flag = 1; 
+        block->nominal_length_flag = true;
     } else { 
-        block->nominal_length_flag = 0; 
+        block->nominal_length_flag = false; 
     }
-    block->recalculate_flag = 1; // Always calculate trapezoid for new block
+    block->recalculate_flag = true; // Always calculate trapezoid for new block
 
     /* Update previous path unit_vector and nominal speed */
     memcpy(previous_speed, current_speed, sizeof(previous_speed));
     previous_nominal_speed = block->nominal_speed;
 
 #if 0 
-    printf("[Truby]: max_entry_speed %f, entry_speed %f, nominal_speed %f, safe_speed %f\n",
+    printf("max_entry_speed %f, entry_speed %f, nominal_speed %f, safe_speed %f\n",
             block->max_entry_speed, block->entry_speed, block->nominal_speed, safe_speed);
 #endif
 
@@ -741,24 +745,58 @@ void plan_buffer_line(float x, float y, float z, const float e,
                                   block->entry_speed / block->nominal_speed,
                                   safe_speed / block->nominal_speed);
 
-    /* Move buffer head */
-    block_buffer_head = next_buffer_head;
-
+    //block_buffer_head = next_buffer_head;
     /* Update position */
     memcpy(position, target, sizeof(target));
+	//last_E_axis_steps_per_unit = pa.axis_steps_per_unit[E_AXIS + extruder];
 
     planner_recalculate();
+	
+    /* Move buffer head */
+    block_buffer_head = next_buffer_head;
 }
+
+
+extern volatile unsigned char active_extruder;		
+
 /*
  * Set position
  * Used for G92 instructions.
  */
 void plan_set_position(float x, float y, float z, const float e)
 {
+	if ((pa.machine_type != MACHINE_DELTA) && pa.autoLeveling) {
+        apply_rotation_xyz(plan_bed_level_matrix, &x, &y, &z);
+    }
+
     position[X_AXIS] = lround(x * pa.axis_steps_per_unit[X_AXIS]); 
     position[Y_AXIS] = lround(y * pa.axis_steps_per_unit[Y_AXIS]); 
     position[Z_AXIS] = lround(z * pa.axis_steps_per_unit[Z_AXIS]); 
-    position[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS]); 
+    position[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS + active_extruder]); 
+
+    /* Reset planner junction speeds. Assume start from rest */ 
+    previous_nominal_speed = 0.0;
+    previous_speed[0] = 0.0;
+    previous_speed[1] = 0.0;
+    previous_speed[2] = 0.0;
+    previous_speed[3] = 0.0;
+}
+
+void plan_set_position_no_delta_autolevel(float x, float y, float z, const float e)
+{
+	if ((pa.machine_type != MACHINE_DELTA) && pa.autoLeveling) {
+        apply_rotation_xyz(plan_bed_level_matrix, &x, &y, &z);
+    }
+
+    position[X_AXIS] = lround(x * pa.axis_steps_per_unit[X_AXIS]); 
+    position[Y_AXIS] = lround(y * pa.axis_steps_per_unit[Y_AXIS]); 
+    position[Z_AXIS] = lround(z * pa.axis_steps_per_unit[Z_AXIS]); 
+    position[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS + active_extruder]); 
+
+	stepper_set_position(lround(x * pa.axis_steps_per_unit[X_AXIS]),
+			lround(y * pa.axis_steps_per_unit[Y_AXIS]),
+			lround(z * pa.axis_steps_per_unit[Z_AXIS]),
+			lround(e * pa.axis_steps_per_unit[E_AXIS]));
 
     /* Reset planner junction speeds. Assume start from rest */ 
     previous_nominal_speed = 0.0;
@@ -770,7 +808,7 @@ void plan_set_position(float x, float y, float z, const float e)
 
 void plan_set_e_position(const float e)
 {
-    position[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS]); 
+    position[E_AXIS] = lround(e * pa.axis_steps_per_unit[E_AXIS + active_extruder]); 
 }
 /* 
  * Discard the current block 
@@ -778,7 +816,7 @@ void plan_set_e_position(const float e)
 void plan_discard_current_block(void)
 {
     if (block_buffer_head != block_buffer_tail) {
-        block_buffer_tail = (block_buffer_tail + 1) & BLOCK_BUFFER_MASK;
+        block_buffer_tail = (block_buffer_tail + 1) & (BLOCK_BUFFER_SIZE - 1);
     }
 }
 /* 
@@ -790,7 +828,7 @@ block_t *plan_get_current_block(void)
         return NULL;
     }
     block_t *block = &block_buffer[block_buffer_tail];
-    block->busy = 1;
+    block->busy = true;
     return block;
 }
 /*
@@ -803,6 +841,202 @@ int plan_get_block_size(void)
     return queued;
 }
 /*
+ * Planner thread
+ * Pop block from block_buffer and queue it to stepper thread
+ */
+extern Fifo_Handle  hFifo_st2plan;
+extern Fifo_Handle  hFifo_plan2st;
+extern Pause_Handle hPause_printing;
+void *planner_thread_worker(void *arg)
+{
+    int ret = 0;
+    block_t *plan_block = NULL;
+    block_t *st_block = NULL;
+
+
+    /* Thread start up sync */
+
+    if (hPause_printing) {
+        Pause_test(hPause_printing);
+    }
+
+    printf("[plan]: start up planner thread\n");
+    while (!thread_quit) {
+        //TODO: Blocking exit, Get all block from buffer
+
+        if (hPause_printing) {
+            Pause_test(hPause_printing);
+        }
+
+        /* Get available block from stepper */
+        plan_block = plan_get_current_block();
+        if (plan_block) {
+            ret = Fifo_get(hFifo_st2plan, (void **)&st_block);
+            if (ret == 0 && st_block) {
+                /* get block from gcode thread */
+                memcpy(st_block, plan_block, sizeof(block_t));
+
+                /* Put stepper block to stepper thread */ 
+                ret = Fifo_put(hFifo_plan2st, st_block);
+                if (ret != 0) {
+                    printf("[plan]: Put Fifo to stepper err\n");
+                } else {
+                    st_block = NULL;
+                }
+
+                /* Discard current block */
+                plan_discard_current_block();
+
+                /* Put planner block back to gcode */
+                plan_block = NULL;
+                st_block = NULL;
+            } 
+        } else {
+            usleep(10000);
+        }
+    }
+
+    printf("Leaving planner thread!\n");
+	return NULL;
+    //pthread_exit(NULL);
+}
+
+void put_mcode_to_fifo()
+{
+    int ret = 0;
+    block_t mcode_block = {0};
+    block_t *st_block = NULL;
+
+	mcode_block.type = BLOCK_M_CMD;
+
+	ret = Fifo_get(hFifo_st2plan, (void **)&st_block);
+	if (ret == 0 && st_block) {
+		memcpy(st_block, &mcode_block, sizeof(block_t));
+
+		ret = Fifo_put(hFifo_plan2st, st_block);
+		if (ret != 0) {
+			printf("[plan]: Put Fifo to stepper err\n");
+		} else {
+			st_block = NULL;
+		}
+
+		st_block = NULL;
+	} 
+}
+
+
+/*
+ * Init the planner sub system
+ */
+int plan_init(void)
+{
+    int i;
+    int ret;
+    pthread_attr_t attr;
+    //struct sched_param sched;
+
+    for (i = 0; i < NUM_AXIS; i++) {
+        axis_steps_per_sqr_second[i] = pa.max_acceleration_units_per_sq_second[i] 
+                                       * pa.axis_steps_per_unit[i];
+    }
+
+    /* clear position */
+    position[X_AXIS] = 0;
+    position[Y_AXIS] = 0;
+    position[Z_AXIS] = 0;
+    position[E_AXIS] = 0;
+
+    block_buffer_head = 0;
+    block_buffer_tail = 0;
+    
+    previous_speed[0] = 0.0;
+    previous_speed[1] = 0.0;
+    previous_speed[2] = 0.0;
+    previous_speed[3] = 0.0;
+    
+    previous_nominal_speed = 0.0;
+
+    /* Initial the pthread attribute */
+    if (pthread_attr_init(&attr)) {
+        return -1;
+    }
+
+    /* Force the thread to use custom scheduling attributes  */
+	#if 0 //for android
+    if (pthread_attr_setschedpolicy(&attr, PTHREAD_EXPLICIT_SCHED)) {
+        return -1;
+    }
+    sched.sched_priority = sched_get_priority_max(SCHED_FIFO);
+
+    printf("sched_priority max: %d, min %d\n", 
+            sched.sched_priority,
+            sched_get_priority_min(SCHED_FIFO));
+    if (pthread_attr_setschedparam(&attr, &sched)) {
+        return -1;
+    }
+	#endif 
+    
+
+    if (thread_quit) {
+        thread_quit = false;
+    }
+
+    printf("--- Creating planner_thread..."); 
+    ret = pthread_create(&planner_thread, &attr, planner_thread_worker, NULL);
+    if (ret) {
+        printf("create planner thread failed with ret %d\n", ret);
+        return -1;
+    } else {
+        printf("done ---\n");
+    }
+
+    return 0;
+}
+/*
+ * Delete the planner sub system
+ */
+void plan_exit(void)
+{
+    if (!stop) {
+        stop = true;
+    }
+    
+    if (!thread_quit) {
+        thread_quit = true;
+    }
+
+    printf("waiting planner to quit\n");
+    //pthread_join(planner_thread, NULL); //FIXME
+    printf("ok\n");
+}
+/*
+ * Start Planner
+ */
+void plan_start(void)
+{
+    if (stop) {
+        stop = false;
+    }
+
+#if 1
+    /* clear position */
+    position[X_AXIS] = 0;
+    position[Y_AXIS] = 0;
+    position[Z_AXIS] = 0;
+    position[E_AXIS] = 0;
+
+    block_buffer_head = 0;
+    block_buffer_tail = 0;
+    
+    previous_speed[0] = 0.0;
+    previous_speed[1] = 0.0;
+    previous_speed[2] = 0.0;
+    previous_speed[3] = 0.0;
+    
+    previous_nominal_speed = 0.0;
+#endif
+}
+/*
  * Stop Planner
  */
 void plan_stop(void)
@@ -810,11 +1044,21 @@ void plan_stop(void)
     if (!stop) {
         stop = true;
     }
-}
-/*
- * Delete the planner sub system
- */
-void plan_exit(void)
-{
 
+    /* clear position */
+    position[X_AXIS] = 0;
+    position[Y_AXIS] = 0;
+    position[Z_AXIS] = 0;
+    position[E_AXIS] = 0;
+
+    block_buffer_head = 0;
+    block_buffer_tail = 0;
+    
+    previous_speed[0] = 0.0;
+    previous_speed[1] = 0.0;
+    previous_speed[2] = 0.0;
+    previous_speed[3] = 0.0;
+    
+    previous_nominal_speed = 0.0;
 }
+

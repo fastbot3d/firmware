@@ -7,121 +7,72 @@
 
 #include "common.h"
 #include "thermistor.h"
-
-struct convert_entry {
-    unsigned int adc_value;
-    double       celsius;
-};
+#include "eeprom.h"
+#include "parameter.h"
 
 static const struct convert_entry thermistor_pt100[] = {
-    { 4096, 7.0 },
-    { 3893, 35.2 },
-    { 3859, 38.3 },
-    { 3834, 39.8 },
-    { 3823, 41.1 },
-    { 3800, 43.8 },
-    { 3775, 44.2 },
-    { 3732, 46.6 },
-    { 3682, 49.1 },
-    { 3616, 52.7 },
-    { 3561, 55.0 }, 
-    { 3493, 57.7 },
-    { 3393, 61.7 },
-    { 3284, 65.2 },
-    { 3195, 68.7 },
-    { 3102, 71.6 },
-    { 3006, 75.2 },
-    { 2772, 81.2 },
-    { 2596, 86.5 },
-    { 2526, 89.5 },
-    { 2458, 91.2 },
-    { 2353, 93.4 }, 
-    { 2214, 97.1 },
-    { 2146, 99.5 },
-    { 2048, 102.3 },
-    { 1982, 104.3 },
-    { 1889, 106.8 },
-    { 1795, 109.4 },
-    { 1707, 111.8 },
-    { 1622, 113.6 },
-    { 1568, 116.5 },
-    { 1488, 118.7 },
-    { 1413, 121.9 },
-    { 1340, 124.0 },
-    { 1249, 127.6 },
-    { 1206, 130.3 },
-    { 1165, 132.0 },
-    { 1104, 134.8 },
-    { 1047, 136.9 },
-    { 1013, 138.7 },
-    { 978, 140.2 },
-    { 928, 142.4 },
-    { 899, 145.2 },
-    { 853, 147.7 },
-    { 769, 149.4 },
-    { 744, 152.0 },
-    { 719, 154.6 },
-    { 696, 157.8 },
-    { 678, 160.3 },
-    { 651, 161.5 },
-    { 630, 163.4 },
-    { 610, 165.0 },
-    { 580, 167.7 },
-    { 562, 170.1 },
-    { 535, 172.2 },
-    { 510, 173.4 },
-    { 501, 174.8 },
-    { 485, 176.6 },
-    { 469, 178.0 },
-    { 473, 179.2 },
-    { 448, 181.0 },
-    { 441, 182.2 },
-    { 428, 183.7 },
-    { 414, 184.8 },
-    { 407, 185.3 },
-    { 396, 187.1 },
-    { 385, 189.1 },
-    { 369, 191.2 },
-    { 357, 192.5 },
-    { 353, 193.5 },
-    { 341, 195.2 },
-    { 332, 196.4 },
-    { 328, 197.2 },
-    { 309, 199.7 },
-    { 305, 200.7 },
-    { 298, 202.8 },
-    { 294, 203.5 },
-    { 284, 204.6 },
-    { 282, 205.3 },
-    { 278, 206.1 },
-    { 273, 207.0 },
-    { 271, 208.0 },
-    { 264, 209.0 },
-    { 259, 210.0 },
-    { 253, 212.0 },
-    { 250, 213.0 },
-    { 241, 214.0 },
-    { 234, 217.0 },
-    { 232, 218.0 },
-    { 225, 219.0 },
-    { 223, 220.0 },
-    { 216, 221.0 },
-    { 214, 222.0 },
-    { 209, 223.0 },
-    { 200, 225.0 },
-    { 198, 226.0 },
-    { 196, 227.0 },
-    { 191, 229.0 },
-    { 189, 230.0 },
-    { 184, 231.0 },
-    { 182, 233.0 },
-    { 180, 234.0 },
-    { 173, 236.0 },
-    { 164, 237.0 },
-    { 159, 238.0 },
-    { 155, 239.0 },
-    { 148, 240.0 },
-    { 146, 241.0 },
+  	{ 4096, 0 },
+ 	 {4029.29 ,       2   },
+     {4013.30 ,       5   },
+     {3993.31 ,       10  },
+     {3969.33 ,       15  },
+     {3937.35 ,       20 },
+     {3905.37 ,       25 },
+     {3861.40 ,       30 },
+     {3813.43 ,       35 },
+     {3753.47 ,       40 },
+	 {3685.52 ,       45 },
+     {3609.57 ,       50 },
+     {3521.63 ,       55 },
+     {3425.69 ,       60 },
+     {3317.77 ,       65 },
+     {3201.84 ,       70 },
+     {3077.93 ,       75 },
+     {2946.02 ,       80 },
+     {2806.11 ,       85 },
+     {2658.21 ,       90 },
+     {2510.31 ,       95 },
+     {2362.41 ,       100},
+     {2210.51 ,       105},
+     {2062.61 ,       110},
+	 {1918.71 ,       115},
+     {1778.80 ,       120},
+     {1642.89 ,       125},
+     {1514.98 ,       130},
+     {1391.06 ,       135},
+     {1279.14 ,       140},
+     {1171.21 ,       145},
+     {1071.28 ,       150},
+	 {979.34 ,       155},
+     {895.39 ,       160},
+     {819.44 ,       165},
+     {747.49 ,       170},
+     {683.54 ,       175},
+     {623.58 ,       180},
+     {571.61 ,       185},
+	 {523.64 ,       190},
+     {479.67 ,       195},
+     {435.70 ,       200},
+     {399.73 ,       205},
+     {367.75	 , 210},
+     {335.77	 , 215},
+     {311.79	 , 220},
+     {283.80	 , 225},
+     {263.82	 , 230},
+     {243.83	 , 235},
+     {223.84	 , 240},
+     {207.86	 , 245},
+     {191.87	 , 250},
+     {175.88	 , 255},
+     {163.88	 , 260},
+     {151.89	 , 265},
+     {139.9	 , 270},
+     {131.9	 , 275},
+     {123.9	 , 280},
+     {111.9	 , 285},
+     {107.9	 , 290},
+     {	99.9 , 295},
+     { 91.9	 , 300},
 };
 
 static const struct convert_entry thermistor_100k[] = {
@@ -263,14 +214,68 @@ static int convert(const struct convert_entry *table, int entries, int adc, doub
     return 0;
 }
 
-int temp_convert_extruder(int adc, double *celsius)
+int temp_convert_extruder1(int adc, double *celsius)
 {
-    //return convert(thermistor_100k, NR_ITEMS(thermistor_100k), adc, celsius);
-    return convert(thermistor_pt100, NR_ITEMS(thermistor_pt100), adc, celsius);
+	// thermistor connection wire is break.
+	if (adc > ERROR_MAX_ADC || adc < ERROR_MIN_ADC) { 
+		return -1;
+	}
+
+	if (ext1_temp_curve.array_len >0) {
+    	return convert(ext1_temp_curve.curve, ext1_temp_curve.array_len, adc, celsius);
+	} else {
+    	//return convert(thermistor_100k, NR_ITEMS(thermistor_100k), adc, celsius);
+    	return convert(thermistor_pt100, NR_ITEMS(thermistor_pt100), adc, celsius);
+	}
+}
+
+int temp_convert_extruder2(int adc, double *celsius)
+{
+	// thermistor connection wire is break.
+	if (adc > ERROR_MAX_ADC || adc < ERROR_MIN_ADC) {
+		return -1;
+	}
+
+	if (ext2_temp_curve.array_len >0) {
+    	return convert(ext2_temp_curve.curve, ext2_temp_curve.array_len, adc, celsius);
+	} else {
+		//return convert(thermistor_100k, NR_ITEMS(thermistor_100k), adc, celsius);
+		return convert(thermistor_pt100, NR_ITEMS(thermistor_pt100), adc, celsius);
+	}
+}
+
+int temp_convert_extruder3(int adc, double *celsius)
+{
+	return read_max6675_thermocouple(celsius);
+}
+
+ 
+int temp_convert_extruder4(int adc, double *celsius)
+{
+	return read_ad597_thermocouple(AIN_CH_EXT4, celsius);
+}
+
+int temp_convert_extruder5(int adc, double *celsius)
+{
+	return read_ad597_thermocouple(AIN_CH_EXT5, celsius);
+}
+
+int temp_convert_extruder6(int adc, double *celsius)
+{
+	return read_ad597_thermocouple(AIN_CH_EXT6, celsius);
 }
 
 int temp_convert_bed(int adc, double *celsius)
 {
-    //return convert(thermistor_330k, NR_ITEMS(thermistor_330k), adc, celsius);
-    return convert(thermistor_pt100, NR_ITEMS(thermistor_pt100), adc, celsius);
+	// thermistor connection wire is break.
+	if (adc > ERROR_MAX_ADC || adc < ERROR_MIN_ADC) {
+		return -1;
+	}
+
+	if(bed0_temp_curve.array_len >0) {
+    	return convert(bed0_temp_curve.curve, bed0_temp_curve.array_len, adc, celsius);
+	} else {
+		//return convert(thermistor_330k, NR_ITEMS(thermistor_330k), adc, celsius);
+		return convert(thermistor_pt100, NR_ITEMS(thermistor_pt100), adc, celsius);
+	}
 }

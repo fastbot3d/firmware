@@ -1,0 +1,310 @@
+//------------------------------------------------------------
+// pruss_unicorn.hp
+// header file for pru asm which generate step and dir 
+// motor control signals
+//------------------------------------------------------------
+
+//#define CTBIR0   0x22020
+//#define CTBIR0   0x22024
+
+#define CTPPR_0   0x22028
+#define CTPPR_1   0x2202C
+
+.macro LD32
+.mparam dst, src    
+    LBBO dst, src, #0x00, 4
+.endm
+
+.macro ST32
+.mparam src, dst
+    SBBO src, dst, #0x00, 4
+.endm
+
+#define PRU0_ARM_IRQ       19
+#define PRU1_ARM_IRQ       20
+
+#define CONST_PRUCFG       C4
+;;#define CONST_PRUDRAM      C24
+;;#define CONST_PRUDRAM      C28
+#define CONST_PRUSHAREDRAM C28
+#define CONST_DDR          C31
+#define CONST_PRUDRAM CONST_DDR
+
+#define GPIO_0         0x44E07000
+#define GPIO_1         0x4804C000
+#define GPIO_2         0x481AC000
+#define GPIO_3         0x481AE000
+#define GPIO_3_BASE_2      0x2000
+
+#define GPIO_DATAIN    0x138
+#define GPIO_DATAOUT   0x13C
+
+#define AXIS_X         0x1
+#define AXIS_Y         0x2
+#define AXIS_Z         0x4
+#define AXIS_E         0x8
+
+#define AXIS_X_BIT         0x0
+#define AXIS_Y_BIT         0x1
+#define AXIS_Z_BIT         0x2
+#define AXIS_E_BIT         0x3
+
+;; stepper motor control gpio
+#define STEP_X         21    ;;GPIO1_21
+#define STEP_Y         22    ;;GPIO1_22
+#define STEP_Z         23    ;;GPIO1_23
+#define STEP_E         28    ;;GPIO1_28
+#define STEP_E2        24    ;;GPIO1_24
+#define STEP_E3        25    ;;GPIO1_25
+#define STEP_U         27    ;;GPIO1_27
+#define STEP_U2        18    ;;GPIO1_18
+
+#define DIR_X          0     ;;GPIO2_0
+#define DIR_Y          4     ;;GPIO2_4
+#define DIR_Z          3     ;;GPIO2_3
+#define DIR_E          2     ;;GPIO2_2
+#define DIR_E2         5     ;;GPIO2_5
+#define DIR_E3         7     ;;GPIO3_7
+#define DIR_U          8     ;;GPIO3_8
+#define DIR_U2         20    ;;GPIO0_20
+
+;; limit switch input gpio
+#define MIN_X          1     ;; GPIO2_1
+#define MIN_Y          17    ;; GPIO1_17
+#define MIN_Z          31    ;; GPIO0_31
+#define AUTO_LEVEL_Z   14    ;; GPIO0_14
+
+#define MAX_X          30    ;; GPIO0_30
+#define MAX_Y          19    ;; GPIO1_19
+#define MAX_Z          15    ;; GPIO0_15
+
+;; buffer queue macro
+;;#define QUEUE_LEN      200
+;;#define QUEUE_LEN      320
+;;lkj #define QUEUE_LEN      4096
+;; #define QUEUE_LEN     8192 
+;;#define QUEUE_LEN     12288 
+#define QUEUE_LEN     15360 
+;;#define QUEUE_LEN     3072 
+;;#define QUEUE_LEN     1024 
+
+#define STATE_EMPTY    0
+#define STATE_FILLED   1
+#define STATE_EXIT     2
+
+#define STATE_IDLE     3
+#define STATE_PAUSE    4
+#define STATE_PAUSE_FINISH  10
+#define STATE_HOME     5
+#define STATE_PRINT    6
+#define STATE_STOP     7
+#define STATE_RESUME   8
+#define STATE_TEST     9
+#define LOAD_FILAMENT  11
+#define UNLOAD_FILAMENT  12
+
+
+#define MACHINE_XYZ     0
+#define MACHINE_DELTA   1
+#define MACHINE_COREXY  2
+
+#define BBP1_EXTEND_FUNC_DUAL_Z  1
+#define BBP1_EXTEND_FUNC_DUAL_EXTRUDER 2
+
+#define BLOCK_M_CMD_BIT   	1
+#define BLOCK_G_CMD_BIT   	0
+.struct QueueHeader
+    .u8 state
+    .u8 dir_bits
+    .u8 dir
+    .u8 type
+.ends
+
+.struct ExtendParameter
+    .u8 machine_type
+    .u8 bbp1_extend_func
+    .u8 reserved_1
+    .u8 reserved_2
+.ends
+
+.struct Queue
+    .u32 state
+    .u32 homing_axis
+    .u32 homing_dir
+    .u32 homing_time
+
+    .u32 pos_x
+    .u32 pos_y
+    .u32 pos_z
+    .u32 pos_e
+
+    .u32 pause_x
+    .u32 pause_y 
+    .u32 pause_z 
+.ends
+
+
+.struct Movement
+    .u32 loops_accel         ;; Phase 1: steps spent in acceleration.
+    .u32 loops_travel        ;; Phase 2: steps spent in travel.
+    .u32 loops_decel         ;; Phase 3: steps spent in deceleration.
+    .u32 steps_count         ;; steps event count of this movement
+
+    .u32 accel_cycles        ;; acceleration delay cycles
+    .u32 travel_cycles       ;; Exact cycle value for travel
+    .u32 decel_cycles        ;; decelerate delay cycles
+
+    .u32 init_cycles         ;; initial delay cycles for acceleration
+
+    .u32 steps_x             ;; steps count of axis x 
+    .u32 steps_y             ;; steps count of axis y
+    .u32 steps_z             ;; steps count of axis z
+    .u32 steps_e             ;; steps count of axis e
+
+	//.u32 ext_step_ctl_gpio;     ;;active extruder gpio out
+    .u8 ext_step_bit          ;;// bit 0-2 dir e0, e1, e2, 3-5 active extruder E0, E1, E2  
+    .u8 ext_reserved_1         
+    .u8 ext_reserved_2              
+    .u8 ext_reserved_3              
+
+    //.u32 ext_step_dir_gpio;     
+    .u8  reserved_1         
+    .u8  reserved_2         
+    .u8  reserved_3         
+    .u8  reserved_4         
+    .u8  reserved_5         //ext_step_ctl_offset;     
+    .u8  reserved_6         //ext_step_dir_offset;  
+	.u8  reserved_7         
+    .u8  reserved_8 
+.ends
+    ;;.u32 final_cycles        ;; finial delay cycles for deceleration
+
+//#define MOVE_START r13
+//#define MOVE_END   r23
+#define MOVE_START r10  //lkj
+#define MOVE_END   r24  //lkj
+;;#define MOVE_END   r20
+#define QUEUE_ELEMENT_SIZE (SIZE(QueueHeader) + SIZE(Movement))
+#define QUEUE_SIZE         (QUEUE_ELEMENT_SIZE * QUEUE_LEN)
+
+#define EXT_STEP_CTL_GPIO  0x4804C13C 
+#define EXT_STEP_DIR_GPIO  0x481AC13C   //EXT0 == EXT1 
+#define EXT2_STEP_DIR_GPIO 0x481AE13C 
+
+#define EXT0_STEP_CTL_OFFSET 28
+#define EXT1_STEP_CTL_OFFSET 24
+#define EXT2_STEP_CTL_OFFSET 25
+
+#define EXT0_STEP_DIR_OFFSET 2
+#define EXT1_STEP_DIR_OFFSET 5
+#define EXT2_STEP_DIR_OFFSET 7
+
+#define MOTOR56_MODE_EXTRUDER   0
+#define MOTOR56_MODE_DUAL_X_Y   1
+
+;; counter states of the motors
+.struct Counter
+    .u32 x
+    .u32 y
+    .u32 z
+    .u32 e
+.ends
+#define MC_START r25
+#define MC_END   r28
+
+;; update step signal to gpio register
+.macro UpdateStep
+.mparam gpio_reg, counter, step, step_count, gpio_bit
+    ADD  counter, counter, step
+    QBGT UP_STEP_OUT, counter, step_count 
+    SET  gpio_reg, gpio_bit
+    SUB  counter, counter, step_count
+UP_STEP_OUT:
+.endm
+
+;; update dual step signal to gpio register
+.macro UpdateDualStep
+.mparam gpio_reg, counter, step, step_count, gpio_bit1, gpio_bit2
+    ADD  counter, counter, step
+    QBGT UP_STEP_OUT, counter, step_count 
+    SET  gpio_reg, gpio_bit1
+    SET  gpio_reg, gpio_bit2
+    SUB  counter, counter, step_count
+UP_STEP_OUT:
+.endm
+
+;; update dir signal to gpio register
+.macro UpdateDir
+.mparam gpio_reg, scratch, dir_bits, axis_mask, gpio_bit
+    LDI  scratch, axis_mask
+    AND  scratch, dir_bits, scratch
+    QBEQ UP_DIR_LOW, scratch, 0
+    SET  gpio_reg, gpio_bit
+UP_DIR_LOW:
+    QBNE UP_DIR_OUT, scratch, 0
+    CLR  gpio_reg, gpio_bit
+UP_DIR_OUT:
+.endm
+
+;; Update Position
+.macro UpdatePos
+.mparam  pos, scratch, dir, axis_mask
+    LDI  scratch, axis_mask
+    AND  scratch, dir, scratch
+    QBEQ UP_POS_SUB, scratch, 0 
+    SUB  pos, pos, 1
+UP_POS_SUB:
+    QBNE UP_POS_OUT, scratch, 0 
+    ADD pos, pos, 1
+UP_POS_OUT:
+.endm
+
+.macro UpdatePosDelta
+.mparam  pos, scratch, dir, axis_mask
+    LDI  scratch, axis_mask
+    AND  scratch, dir, scratch
+    QBEQ UP_POS_SUB, scratch, 0 
+    ADD  pos, pos, 1
+UP_POS_SUB:
+    QBNE UP_POS_OUT, scratch, 0 
+    SUB pos, pos, 1
+UP_POS_OUT:
+.endm
+
+;; Calculate the current delay depending on the phase: 
+;; acceleration, travel and deceleration.
+.macro CalculateDelay
+.mparam delay, params
+    ZERO &delay, 4
+ACCELERATION:
+    QBEQ TRAVEL, params.loops_accel, 0
+    SUB params.init_cycles, params.init_cycles, params.accel_cycles
+    SUB params.loops_accel, params.loops_accel, 1
+    MOV delay, params.init_cycles
+    JMP DONE_CALC_DELAY
+TRAVEL:
+    QBEQ DECELERATION, params.loops_travel, 0
+    SUB params.loops_travel, params.loops_travel, 1
+    MOV delay, params.travel_cycles 
+    JMP DONE_CALC_DELAY
+DECELERATION:
+    QBEQ DONE_CALC_DELAY, params.loops_decel, 0 
+    ADD params.travel_cycles, params.travel_cycles, params.decel_cycles
+    SUB params.loops_decel, params.loops_decel, 1
+    MOV delay, params.travel_cycles
+DONE_CALC_DELAY:
+.endm
+   
+.macro CalculateDelay_T
+.mparam delay
+    MOV delay, 100000
+.endm
+
+.macro DELAY_NS
+.mparam ns
+    MOV r9, ns
+LOOP_10NS:
+    SUB r9, r9, 10
+    QBLT LOOP_10NS, r9, 10
+.endm
+

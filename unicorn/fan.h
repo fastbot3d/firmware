@@ -10,6 +10,7 @@
 typedef const struct {
     channel_tag  tag;
     channel_tag  pwm;
+    unsigned int gpio;
     unsigned int level;
 } fan_config_t;
 
@@ -22,6 +23,7 @@ extern int fan_init(void);
 extern void fan_exit(void);
 
 extern channel_tag fan_lookup_by_name(const char *name);
+extern channel_tag fan_lookup_by_index(int idx);
 
 extern int fan_enable(channel_tag fan);
 extern int fan_disable(channel_tag fan);

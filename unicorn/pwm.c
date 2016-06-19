@@ -19,8 +19,8 @@ typedef struct {
     const char   *device_path;
     int          state;
     unsigned int frequency;
-    unsigned int duty;
-    unsigned int period;
+    unsigned int period_ns;
+    unsigned int duty_ns;
 } pwm_t;
 
 static pwm_t *pwms = NULL;
@@ -36,10 +36,8 @@ static int pwm_index_lookup(channel_tag pwm_channel)
         }
     }
 
-    if DBG(D_PWM) {
-        fprintf(stderr, "pwm_index_lookup failed for '%s'\n",
+    PWM_DBG("pwm_index_lookup failed for '%s'\n",
                 tag_name(pwm_channel));
-    }
     return -1;
 }
 
@@ -61,9 +59,7 @@ int pwm_config(pwm_config_t *pcfgs, int nr_cfgs)
 {
     int i;
 
-    if DBG(D_PWM) {
-        printf("pwm_config called with %d records\n", nr_cfgs);
-    }
+    PWM_DBG("pwm_config called with %d records\n", nr_cfgs);
     
     pwms = calloc(nr_cfgs, sizeof(pwm_t));
     if (!pwms) {
@@ -81,11 +77,8 @@ int pwm_config(pwm_config_t *pcfgs, int nr_cfgs)
         }
 
         pd->id          = ps->tag; 
-#ifdef HOST
-        pd->device_path = "test";
-#else
-        pd->device_path = sys_path_finder(path, NAME_MAX, ps->device_path);
-#endif
+        //lkj for android pd->device_path = sys_path_finder(path, NAME_MAX, ps->device_path);
+        pd->device_path = ps->device_path;
         pd->frequency   = ps->frequency;
         pd->state       = PWM_STATE_OFF;
 
@@ -95,29 +88,28 @@ int pwm_config(pwm_config_t *pcfgs, int nr_cfgs)
     return 0;
 }
 
-int pwm_init(void)
+int pwm_init()
 {
     int i;
-    if DBG(D_PWM) {
-        printf("pwm_init called.\n");
-    }
+
+    PWM_DBG("pwm_init called.\n");
 
     for (i = 0; i < nr_pwms; i++) {
         pwm_t *pd = &pwms[i];
+        pd->state = PWM_STATE_OFF;
 
-#ifdef HOST
-        if DBG(D_PWM) {
-            printf("pwm_init: request %s\n", pd->id);
-        }
-#else
-        /* setup pwm channel */ 
+		PWM_DBG("pwm_init: request %s\n", pd->id);
+		/* setup pwm channel */ 
         pwm_write_sysfs(pd->device_path, "request", 1);
-        pwm_write_sysfs(pd->device_path, "polarity", 0);
-        pwm_write_sysfs(pd->device_path, "duty_percent", 0);
+
+    	if (bbp_board_type == BOARD_BBP1) {
+            pwm_write_sysfs(pd->device_path, "polarity", 0);
+        }
+
         if (pd->frequency) {
             pwm_write_sysfs(pd->device_path, "period_freq", pd->frequency);
         }
-#endif
+        pwm_write_sysfs(pd->device_path, "duty_percent", 0);
     }
 
     return 0;
@@ -127,25 +119,65 @@ void pwm_exit(void)
 {
     int i;
 
-    if DBG(D_PWM) {
-        printf("pwm_exit called.\n");
-    }
+    PWM_DBG("pwm_exit called.\n");
 
     for (i = 0; i < nr_pwms; i++) {
         pwm_t *pd = &pwms[i];
         pd->state = PWM_STATE_OFF;
-#ifdef HOST
-        if DBG(D_PWM) {
-            printf("pwm_exit: turn off %s\n", pd->id);
-        }
-#else
-        /* Turn off pwm */           
+		PWM_DBG("pwm_exit: turn off %s\n", pd->id);
+		/* Turn off pwm */           
         pwm_write_sysfs(pd->device_path, "duty_percent", 0);        
         pwm_write_sysfs(pd->device_path, "run", 0);        
         pwm_write_sysfs(pd->device_path, "request", 0);
-#endif
-        free((void *)pd->device_path);
+        //FIXME
+        //lkj free((void *)pd->device_path);
     }
+}
+
+int pwm_set_period(channel_tag pwm_ch, unsigned int period_ns)
+{
+    int idx = -1;    
+    pwm_t *pd = NULL; 
+
+	PWM_DBG("pwm_set_period called.\n");
+
+    idx = pwm_index_lookup(pwm_ch);
+    if (idx < 0) {
+        return -1;
+    }
+
+    pd = &pwms[idx];
+
+    if (period_ns != pd->period_ns) {
+        pd->period_ns = period_ns;
+        PWM_DBG("pwm_set_period_ns: %s period_ns %d\n", 
+                pd->id, period_ns);
+        pwm_write_sysfs(pd->device_path, "period_ns", period_ns);
+    }
+
+    return 0;
+}
+
+int pwm_set_duty(channel_tag pwm_ch, unsigned int duty_ns)
+{
+    int idx = -1;    
+    pwm_t *pd = NULL; 
+
+	PWM_DBG("pwm_set_duty called.\n");
+
+    idx = pwm_index_lookup(pwm_ch);
+    if (idx < 0) {
+        return -1;
+    }
+
+    pd = &pwms[idx];
+
+    if (duty_ns != pd->duty_ns) {
+        pd->duty_ns = duty_ns;
+        PWM_DBG("pwm_set_duty_ns: %s duty_ns %d\n", pd->id, duty_ns);
+        pwm_write_sysfs(pd->device_path, "duty_ns", duty_ns);
+    }
+    return 0;
 }
 
 int pwm_set_freq(channel_tag pwm_ch, unsigned int freq)
@@ -153,9 +185,7 @@ int pwm_set_freq(channel_tag pwm_ch, unsigned int freq)
     int idx = -1;    
     pwm_t *pd = NULL; 
 
-    if DBG(D_PWM) {
-        printf("pwm_set_freq called.\n");
-    }
+	PWM_DBG("pwm_set_freq called.\n");
 
     idx = pwm_index_lookup(pwm_ch);
     if (idx < 0) {
@@ -167,14 +197,9 @@ int pwm_set_freq(channel_tag pwm_ch, unsigned int freq)
     if (pd->state == PWM_STATE_ON) {
         if (freq != pd->frequency) {
             pd->frequency = freq;
-            #ifdef HOST
-            if (DBG(D_PWM)) {
-                printf("pwm_set_freq: %s period_freq %d\n", 
-                        pd->id, freq);
-            }
-            #else
-            pwm_write_sysfs(pd->device_path, "period_freq", freq);
-            #endif
+			PWM_DBG("pwm_set_freq: %s period_freq %d\n", 
+					pd->id, freq);
+			pwm_write_sysfs(pd->device_path, "period_freq", freq);
         }
     } else {
         printf("pwm_set_freq: pwm[%d] not enabled\n", idx);
@@ -189,9 +214,7 @@ int pwm_set_output(channel_tag pwm_ch, unsigned int percentage)
     int idx = -1;    
     pwm_t *pd = NULL; 
 
-    if DBG(D_PWM) {
-        printf("pwm_set_output called.\n");
-    }
+	PWM_DBG("pwm_set_output called.\n");
 
     idx = pwm_index_lookup(pwm_ch);
     if (idx < 0 || percentage > 100) {
@@ -200,19 +223,21 @@ int pwm_set_output(channel_tag pwm_ch, unsigned int percentage)
 
     pd = &pwms[idx];
 
-    if (pd->state == PWM_STATE_ON) {
-        #ifdef HOST
-        if (DBG(D_PWM)) {
-            printf("pwm_set_output: %s duty_percent %d\n", 
-                    pd->id, percentage);
-        }
-        #else
-        pwm_write_sysfs(pd->device_path, "duty_percent", percentage);
-        #endif
-    } else {
-        printf("pwm_set_output: pwm[%d] not enabled\n", idx);
-        return -1;
-    }
+	if (bbp_board_type == BOARD_BBP1) {
+		if (pd->state == PWM_STATE_ON) {
+			PWM_DBG("pwm_set_output: %s duty_percent %d\n", 
+					pd->id, percentage);
+			pwm_write_sysfs(pd->device_path, "duty_percent", percentage);
+		} else {
+		    printf("pwm_set_output: pwm[%d] is already enable\n", idx);
+		    return -1;
+		}
+	} else {
+			PWM_DBG("pwm_set_output: %s duty_percent %d\n", 
+					pd->id, percentage);
+			pwm_write_sysfs(pd->device_path, "duty_percent", percentage);
+	}
+
     return 0;
 }
 
@@ -221,9 +246,7 @@ int pwm_enable(channel_tag pwm_ch)
     int idx = -1;    
     pwm_t *pd = NULL; 
 
-    if (DBG(D_PWM)) {
-        printf("pwm_enable called.\n");
-    }
+	PWM_DBG("pwm_enable called.\n");
 
     idx = pwm_index_lookup(pwm_ch);
     if (idx < 0) {
@@ -232,16 +255,11 @@ int pwm_enable(channel_tag pwm_ch)
     pd = &pwms[idx];
     pd->state = PWM_STATE_ON;
 
-#ifdef HOST
-    if (DBG(D_PWM)) {
-        printf("pwm enable: turn on %s\n", pd->id);
-    }
-#else
-    pwm_write_sysfs(pd->device_path, "run", 1);
+	PWM_DBG("pwm enable: turn on %s\n", pd->id);
+	pwm_write_sysfs(pd->device_path, "run", 1);
     if (pd->frequency) {
         pwm_write_sysfs(pd->device_path, "period_freq", pd->frequency);
     }
-#endif
 
     return 0;
 }
@@ -251,9 +269,7 @@ int pwm_disable(channel_tag pwm_ch)
     int idx = -1;    
     pwm_t *pd = NULL; 
 
-    if DBG(D_PWM) {
-        printf("pwm_disable called.\n");
-    }
+	PWM_DBG("pwm_disable called.\n");
 
     idx = pwm_index_lookup(pwm_ch);
     if (idx < 0) {
@@ -263,13 +279,8 @@ int pwm_disable(channel_tag pwm_ch)
     pd = &pwms[idx];
     pd->state = PWM_STATE_OFF;
 
-#ifdef HOST
-    if DBG(D_PWM) {
-        printf("pwm_disable: turn off %s\n", pd->id);
-    }
-#else
-    pwm_write_sysfs(pd->device_path, "run", 0);
-#endif
+	PWM_DBG("pwm_disable: turn off %s\n", pd->id);
+	pwm_write_sysfs(pd->device_path, "run", 0);
 
     return 0;
 }
@@ -279,9 +290,7 @@ int pwm_get_state(channel_tag pwm_ch)
     int idx = -1;    
     pwm_t *pd = NULL; 
 
-    if DBG(D_PWM) {
-        printf("pwm_get_state called.\n");
-    }
+	//PWM_DBG("pwm_get_state called.\n");
 
     idx = pwm_index_lookup(pwm_ch);
     if (idx < 0) {
